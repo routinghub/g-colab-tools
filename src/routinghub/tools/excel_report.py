@@ -171,8 +171,7 @@ def get_route_description(solution):
             else:
                 prev_colocated = False
 
-            waiting_duration = timedelta(seconds=(stop_duration - parking_duration - service_duration).total_seconds())
-
+            waiting_duration = timedelta(seconds=round(waypoint['idle_duration']))
             trip_duration = timedelta(seconds=round(waypoint['travel_duration']))
             waypoint_id = None
 
