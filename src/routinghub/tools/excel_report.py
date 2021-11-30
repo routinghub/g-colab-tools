@@ -115,6 +115,47 @@ def get_statistics_from_routes(solution):
     return statistics_by_route
 
 
+def get_unserved_from_routes(solution):
+    routes = solution['result']['unserved']
+    statistics_by_route = pd.DataFrame(columns=[
+        'Site id',
+        'Reason',
+        'Total waypoints',
+        'Total duration, h',
+        'Total distance, km',
+        'Start time',
+        'Finish time'
+    ])
+
+    for i in range(len(routes)):
+        route = routes[i]
+        total_duration_hours = route['statistics']['total_duration'] / HOUR
+        total_distance_km = route['statistics']['total_travel_distance'] / KM
+        departure_time = change_datetime_format(route['waypoints'][0]['departure_time']).time()
+        arrival_time = change_datetime_format(route['waypoints'][-1]['arrival_time']).time()
+
+        route_statistics = pd.Series([
+            i,
+            route['vehicle']['id'],
+            len(route['waypoints']),
+            total_duration_hours,
+            total_distance_km,
+            departure_time,
+            arrival_time
+        ], index=[
+            'Route',
+            'Vehicle',
+            'Total waypoints',
+            'Total duration, h',
+            'Total distance, km',
+            'Start time',
+            'Finish time'
+        ])
+        statistics_by_route = statistics_by_route.append(route_statistics, ignore_index=True)
+
+    return statistics_by_route
+
+
 def get_total_statistics(solution, apikey):
     stats = get_statistics_from_routes(solution)
     cols = ['Total duration, h', 'Total distance, km']
@@ -161,8 +202,8 @@ def get_route_description(solution):
 
             site_or_depot = waypoint['site'] if 'site' in waypoint else waypoint['depot']
 
-            service_duration = timedelta(seconds=(site_or_depot['duration'] if 'duration' in site_or_depot else 0))
-            parking_duration = timedelta(seconds=(site_or_depot['preparing_duration'] if 'preparing_duration' in site_or_depot else 0))
+            service_duration = timedelta(seconds=round(site_or_depot['duration'] if 'duration' in site_or_depot else 0))
+            parking_duration = timedelta(seconds=round(site_or_depot['preparing_duration'] if 'preparing_duration' in site_or_depot else 0))
             if ('is_colocated' in site_or_depot) and site_or_depot['is_colocated'] == True:
                 if prev_colocated:
                     parking_duration = timedelta(seconds=0)
@@ -487,7 +528,73 @@ def write_waypoints(writer, scenario_name, solutions):
     ws.set_column('F:L', 10, format_left)
 
 
-def write_report(filename, scenarios_solutions, apikey):
+def get_unserved(solution):
+    rows = []
+    for site_id, entry in solution['result']['unserved'].items():
+        site = entry['site']
+        reason = entry['reason']
+        service_duration = timedelta(seconds=round(site['duration'] if 'duration' in site else 0))
+        parking_duration = timedelta(seconds=round(site['preparing_duration'] if 'preparing_duration' in site else 0))
+
+        coord = site['location']
+        job = 'delivery' if 'job' not in site else site['job']
+        time_window_from = change_datetime_format(site['time_window']['start'])
+        time_window_to = change_datetime_format(site['time_window']['end'])
+
+        rows.append([
+            site_id,
+            reason,
+            '{:.4f},{:.4f}'.format(coord['lat'], coord['lng']),
+            time_window_from.time(),
+            time_window_to.time(),
+            str(service_duration),
+            str(parking_duration),
+            job
+        ])
+
+    table = pd.DataFrame(rows)
+    table.columns = [
+        'Stop',
+        'Reason',
+        'Lat/Lng',
+        'Time window from',
+        'Time window to',
+        'Service time',
+        'Parking time',
+        'Job'
+    ]
+    return table
+
+
+def write_unserved(writer, scenario_name, solutions):
+    wb = writer.book
+
+    ws_key = 'Unserved {}'.format(scenario_name)
+    pd.DataFrame([]).to_excel(writer, sheet_name=ws_key)
+    ws = writer.sheets[ws_key]
+
+    format_floats_left = wb.add_format(FORMAT_FLOATS_LEFT_DEF)
+    format_left = wb.add_format(FORMAT_LEFT_DEF)
+
+    startrow = 0
+    for task_id, solution in solutions.items():
+        ws.write('A{}'.format(startrow + 1), task_id, format_left)
+        df = get_unserved(solution)
+        df.to_excel(writer,
+                    sheet_name=ws_key,
+                    index=False,
+                    startrow=startrow + 1)
+        startrow += len(df.index) + 3
+
+    ws.set_column('A:A', 8, format_left)
+    ws.set_column('B:C', 15, format_floats_left)
+    ws.set_column('D:F', 17, format_left)
+    ws.set_column('G:H', 10, format_left)
+
+
+def write_report(
+    filename, scenarios_solutions, apikey='', 
+    metrics=True, routes=True, waypoints=True, legend=True, timeline=True, unserved=True):
 
     pd.io.formats.excel.ExcelFormatter.header_style = {
         'font': {'name': 'Arial', 'bold': True},
@@ -505,16 +612,30 @@ def write_report(filename, scenarios_solutions, apikey):
 
         for scenario_name, unsorted_solutions in scenarios_solutions.items():
             solutions = dict(sorted(unsorted_solutions.items()))
-            
-            print('writing metrics...')
-            write_metrics(writer, scenario_name, solutions, apikey)
-            print('writing routes...')
-            write_routes(writer, scenario_name, solutions)
-            print('writing waypoints...')
-            write_waypoints(writer, scenario_name, solutions)
-            print('writing legend...')
-            write_legend(writer, sheet_name='Legend')
-            print('writing timeline...')
-            write_routes_timeline(writer, solutions, 'Timeline {}'.format(scenario_name))
+
+            if metrics:
+                print('writing metrics...')
+                write_metrics(writer, scenario_name, solutions, apikey)
+
+            if routes:
+                print('writing routes...')
+                write_routes(writer, scenario_name, solutions)
+
+            if waypoints:
+                print('writing waypoints...')
+                write_waypoints(writer, scenario_name, solutions)
+
+            if legend:
+                print('writing legend...')
+                write_legend(writer, sheet_name='Legend')
+
+            if timeline:
+                print('writing timeline...')
+                write_routes_timeline(writer, solutions, 'Timeline {}'.format(scenario_name))
+
+            if unserved:
+                print('writing unserved...')
+                write_unserved(writer, scenario_name, solutions)
+
 
     print('done')
