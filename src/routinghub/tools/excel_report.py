@@ -72,7 +72,6 @@ def add_state_formats(wb):
     ret = {
         STATES[key]: wb.add_format(STATE_FORMATS[key]) for key in STATES.keys() if key in STATE_FORMATS
     }
-    print(ret)
     return ret
 
 
@@ -120,8 +119,10 @@ def get_route_vehicle_and_shift_id(route):
 def get_waypoint_site(waypoint):
     return waypoint['site'] if 'site' in waypoint else waypoint['depot']
 
+
 def get_active_shift_id(route):
     return route['active_shift']['id'] if 'active_shift' in route else ''
+
 
 class RoutesStatistics:
     @enum
@@ -241,7 +242,7 @@ class RouteWaypoints:
     class C:
         ROUTE_ID = 'Route'
         VEHICLE_ID = 'Vehicle'
-        SHIFT_ID = 'Vehicle'
+        SHIFT_ID = 'Shift'
         STOP_TYPE = 'Stop type'
         STOP_ID = 'Stop'
         COORDINATES = 'Lat/Lng'
