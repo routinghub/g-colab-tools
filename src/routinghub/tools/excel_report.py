@@ -622,7 +622,7 @@ def write_unserved(writer, scenario_name, solutions):
                         sheet_name=ws_key,
                         index=False,
                         startrow=startrow + 1)
-        startrow += len(df.index) + 3
+            startrow += len(df.index) + 3
 
     ws.set_column('A:A', 8, format_left)
     ws.set_column('B:C', 15, format_floats_left)

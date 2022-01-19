@@ -79,8 +79,12 @@ def _call_one(
     started_at = time.perf_counter()
     response = _add_task(request, apikey, apihost, api, api_version)
 
-    task_id = response.json()['id']
-    add_task_status = response.json()['status']
+    resp_json = response.json()
+    if 'id' not in resp_json or 'status' not in resp_json or response.status_code >= 300:
+        raise Exception('Unexpected API response: code={} body={}'.format(response.status_code, response.text))
+        
+    task_id = resp_json['id']
+    add_task_status = resp_json['status']
 
     _logger.info('task={} submitted: id={} status={}'.format(name, task_id, add_task_status))
     response = get_task_result(task_id, apikey,apihost,  api, api_version)
