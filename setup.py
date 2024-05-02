@@ -2,7 +2,7 @@ import setuptools
 
 setuptools.setup(
     name="routinghub-g-collab-tools",
-    version="0.0.1",
+    version="0.0.2",
     author="Denis Kurilov",
     author_email="denis@routinghub.com",
     description="Google Collab tools",
