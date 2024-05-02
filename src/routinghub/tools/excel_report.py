@@ -1,9 +1,17 @@
 import pandas as pd
 import numpy as np
+
+import requests
+import hashlib
+import tempfile
+import json 
+
 import math
 import dateutil.parser
-from datetime import timedelta
+from datetime import timedelta, date
 from datetime import datetime, timezone
+import os.path
+
 
 ## Helper functions
 
@@ -106,8 +114,12 @@ def iso8601_to_datetime(v):
     return dateutil.parser.parse(v)
 
 
-def iso8601_to_short_str(v):
-    return iso8601_to_datetime(v).strftime('%m/%d %H:%M:%S')
+def iso8601_to_short_str(v, tz_v=None):
+    dt = iso8601_to_datetime(v)
+    if tz_v is not None:
+        tzdt = iso8601_to_datetime(tz_v)
+        dt = dt.astimezone(tzdt.tzinfo)
+    return dt.strftime('%m/%d %H:%M:%S')
 
 
 def get_route_vehicle_and_shift_id(route):
@@ -132,6 +144,8 @@ class RoutesStatistics:
         TOTAL_SITES = 'Total sites'
         TOTAL_DURATION_H = 'Total duration, h'
         TOTAL_DISTANCE_KM = 'Total distance, km'
+        TOTAL_FAILED_TW_SITES = 'Total failed time windows, sites'
+        TOTAL_FAILED_TW_H = 'Total failed time windows, h'
         START_TIME = 'Start time'
         FINISH_TIME = 'Finish time'
         SHIFT_ID = 'Shift'
@@ -142,6 +156,8 @@ class RoutesStatistics:
         self.vehicle_id = []
         self.total_sites = []
         self.total_duration_h = []
+        self.total_failed_tw_sites = []
+        self.total_failed_tw_h = []
         self.total_distance_km = []
         self.start_time = []
         self.finish_time = []
@@ -155,14 +171,16 @@ class RoutesStatistics:
             self.total_sites.append(int(np.sum([('site' in wp) and 1 or 0 for wp in waypoints])))
             stats = route['statistics']
             self.total_duration_h.append(stats['total_duration'] / UNITS.HOUR)
+            self.total_failed_tw_sites.append(stats['untimely_operations']['total_sites_count'])
+            self.total_failed_tw_h.append(stats['untimely_operations']['total_duration'] / UNITS.HOUR)
             self.total_distance_km.append(stats['total_travel_distance'] / UNITS.KM)
-            self.start_time.append(iso8601_to_short_str(waypoints[0]['arrival_time']))
-            self.finish_time.append(iso8601_to_short_str(waypoints[-1]['departure_time']))
+            self.start_time.append(iso8601_to_short_str(waypoints[0]['arrival_time'], get_waypoint_site(waypoints[0])['time_window']['start']))
+            self.finish_time.append(iso8601_to_short_str(waypoints[-1]['departure_time'], get_waypoint_site(waypoints[-1])['time_window']['start']))
             shift_id = get_active_shift_id(route)
             self.shift_id.append(shift_id)
             used_shifts.append((vehicle_id, shift_id))
         self.total_shifts = len(set(used_shifts))
-        
+
     def to_pd(self):
         return pd.DataFrame({
             self.C.ROUTE_ID: self.route_id,
@@ -170,6 +188,8 @@ class RoutesStatistics:
             self.C.TOTAL_SITES: self.total_sites,
             self.C.TOTAL_DURATION_H: self.total_duration_h,
             self.C.TOTAL_DISTANCE_KM: self.total_distance_km,
+            self.C.TOTAL_FAILED_TW_SITES: self.total_failed_tw_sites,
+            self.C.TOTAL_FAILED_TW_H: self.total_failed_tw_h,
             self.C.START_TIME: self.start_time,
             self.C.FINISH_TIME: self.finish_time,
             self.C.SHIFT_ID: self.shift_id,
@@ -180,6 +200,15 @@ def get_statistics_from_routes(solution):
     return RoutesStatistics(solution).to_pd()
 
 
+def user_data_to_string(ud):
+    if isinstance(ud, list):
+        return '; '.join(ud)
+    elif isinstance(ud, dict):
+        return json.dumps(ud)
+    else:
+        return str(ud)
+
+
 class TotalStatistics:
     @enum
     class R:
@@ -188,6 +217,8 @@ class TotalStatistics:
         TOTAL_VEHICLES = 'Total used vehicles'
         TOTAL_SHIFTS = 'Total used shifts'
         TOTAL_SITES = 'Total sites'
+        TOTAL_FAILED_TW_SITES = 'Total time window failures, sites'
+        TOTAL_FAILED_TW_H = 'Total time window failures, hours'
         TOTAL_DURATION_H = 'Total duration, h'
         TOTAL_DISTANCE_KM = 'Total distance, km'
         MEAN_DURATION_H = 'Mean duration, h'
@@ -211,13 +242,15 @@ class TotalStatistics:
         self.total_routes = len(st.route_id)
         self.total_shifts = len(set([get_route_vehicle_and_shift_id(route) for route in result['routes']]))
         self.total_sites = int(np.sum(st.total_sites))
+        self.total_failed_tw_sites = int(np.sum(st.total_failed_tw_sites))
+        self.total_failed_tw_h = int(np.sum(st.total_failed_tw_h))
         self.total_duration_h = round(np.sum(st.total_duration_h), 2)
         self.total_distance_km = round(np.sum(st.total_distance_km), 2)
         self.mean_duration_h = round(np.mean(st.total_duration_h), 2)
         self.mean_distance_km = round(np.mean(st.total_distance_km), 2)
         self.std_duration_h = round(np.std(st.total_duration_h), 2)
         self.std_distance_km = round(np.std(st.total_distance_km), 2)
-        
+
     def to_pd(self):
         df = pd.DataFrame([{
             self.R.MAP: self.MAP_URL.format(self.solution_id, self.apikey),
@@ -227,6 +260,8 @@ class TotalStatistics:
             self.R.TOTAL_SITES: self.total_sites,
             self.R.TOTAL_DURATION_H: self.total_duration_h,
             self.R.TOTAL_DISTANCE_KM: self.total_distance_km,
+            self.R.TOTAL_FAILED_TW_SITES: self.total_failed_tw_sites,
+            self.R.TOTAL_FAILED_TW_H: self.total_failed_tw_h,
             self.R.MEAN_DURATION_H: self.mean_duration_h,
             self.R.MEAN_DISTANCE_KM: self.mean_distance_km,
             self.R.STD_DURATION_H: self.std_duration_h,
@@ -236,6 +271,51 @@ class TotalStatistics:
         df.columns = [self.C.METRIC, self.C.VALUE]
         return df
 
+
+def make_gmaps_transit_provider(apikey, transit_date):
+    def wrap(origin_pair, destination_pair, departure_time_iso8601):
+        api = 'https://maps.googleapis.com/maps/api/directions/json'
+        dt = datetime.fromisoformat(departure_time_iso8601.replace("Z", "+00:00"))
+        replace_date = date.fromisoformat(transit_date)
+        dt = dt.replace(year=replace_date.year, month=replace_date.month, day=replace_date.day)
+        url =  '{}?key={}&origin={}&destination={}&departure_time={}'.format(
+            api,
+            apikey, 
+            origin_pair,
+            destination_pair,
+            int(dt.timestamp())
+        )
+        url_key = hashlib.sha1(url.encode('utf-8')).hexdigest()
+        cache_file = '{}/.gmm1.{}.json'.format(tempfile.gettempdir(), url_key)
+        if os.path.isfile(cache_file):
+            with open(cache_file, 'r') as f:
+                o = json.load(f)
+                return {
+                    'distance': o['routes'][0]['legs'][0]['distance']['value'],
+                    'duration': o['routes'][0]['legs'][0]['duration']['value']
+                }
+        else:
+            rep = requests.get(url)
+            if rep.status_code == 200:
+                o = rep.json()
+                if o['status'] == 'INVALID_REQUEST':
+                    raise Exception(o)
+                with open(cache_file, 'w') as f:
+                    json.dump(o, f)
+                return {
+                    'distance': o['routes'][0]['legs'][0]['distance']['value'],
+                    'duration': o['routes'][0]['legs'][0]['duration']['value']
+                }
+            else:
+                return {
+                    'distance': math.nan,
+                    'duration': math.nan
+                }
+    return wrap
+
+
+def safe_pct(a, b):
+    return a / b if b != 0 else math.nan
 
 class RouteWaypoints:
     @enum
@@ -250,13 +330,26 @@ class RouteWaypoints:
         TW_END = 'Time window to'
         TRANSIT_DURATION = 'Transit duration'
         TRANSIT_DISTANCE = 'Transit distance, km'
+        ALT_TRANSIT_DURATION = 'Alt.Transit duration'
+        ALT_TRANSIT_DISTANCE = 'Alt.Transit distance, km'
+        ALT_TRANSIT_DURATION_ERROR = 'Transit duration error'
+        ALT_TRANSIT_DISTANCE_ERROR = 'Transit distance error'
         ARRIVAL_TIME = 'Arrival time'
+        OUT_OF_TIME_DURATION = 'Time window failure duration'
         IDLE_DURATION = 'Waiting duration'
         JOB_DURATION = 'Job duration'
         DEPARTURE_TIME = 'Departure time'
         COLOCATED = 'Colocated'
+        USERDATA = 'Custom data'
 
-    def __init__(self, route_id=None, vehicle_id=None, shift_id=None, route=None):
+    @staticmethod
+    def _has_user_data(waypoints):
+        for wp in waypoints:
+            if 'site' in wp and 'user_data' in wp['site']:
+                return True
+        return False
+
+    def __init__(self, route_id=None, vehicle_id=None, shift_id=None, route=None, alt_transit_provider=None):
         waypoints = route['waypoints']
         self.route_id = [route_id] * len(waypoints)
         self.vehicle_id = [vehicle_id] * len(waypoints)
@@ -268,12 +361,24 @@ class RouteWaypoints:
         self.tw_end = []
         self.transit_duration = []
         self.transit_distance = []
+        self._alt_transit_provider = alt_transit_provider
+        self.has_alt_transit = self._alt_transit_provider is not None
+        if self.has_alt_transit:
+            self.alt_transit_duration = []
+            self.alt_transit_distance = []
+            self.alt_transit_duration_error = []
+            self.alt_transit_distance_error = []
         self.arrival_time = []
         self.idle_duration = []
+        self.out_of_time_duration = []
         self.job_duration = []
         self.departure_time = []
         self.colocated_index = []
-        for waypoint in waypoints:
+        self.has_user_data = RouteWaypoints._has_user_data(waypoints)
+        if self.has_user_data:
+            self.user_data = []
+        for idx, waypoint in enumerate(waypoints):
+            prev_idx = -1 if idx == 0 else idx-1
             stop_type = 'site' if 'site' in waypoint else 'depot'
             stop_site = get_waypoint_site(waypoint)
             if stop_type == 'site':
@@ -285,12 +390,26 @@ class RouteWaypoints:
             self.tw_end.append(iso8601_to_short_str(stop_site['time_window']['end']))
             self.transit_duration.append(str(timedelta(seconds=round(waypoint['travel_duration']))))
             self.transit_distance.append(round(waypoint['travel_distance'] / UNITS.KM, 4))
-            self.arrival_time.append(iso8601_to_short_str(waypoint['arrival_time']))
+            if self.has_alt_transit:
+                alt = self._alt_transit_provider(
+                    self.coordinates[prev_idx],
+                    self.coordinates[idx],
+                    waypoints[prev_idx]['departure_time']
+                )
+                self.alt_transit_duration.append(str(timedelta(seconds=round(alt['duration']))))
+                self.alt_transit_distance.append(round(alt['distance'] / UNITS.KM, 4))
+                self.alt_transit_duration_error.append(safe_pct(alt['duration'], waypoint['travel_duration']))
+                self.alt_transit_distance_error.append(safe_pct(alt['distance'], waypoint['travel_distance']))
+            self.arrival_time.append(iso8601_to_short_str(waypoint['arrival_time'], stop_site['time_window']['start']))
+            self.out_of_time_duration.append(str(timedelta(seconds=round(waypoint['untimely_duration']))))
             self.idle_duration.append(str(timedelta(seconds=round(waypoint['idle_duration']))))
             self.job_duration.append(str(timedelta(seconds=round(waypoint['job_duration']))))
-            self.departure_time.append(iso8601_to_short_str(waypoint['departure_time']))
+            self.departure_time.append(iso8601_to_short_str(waypoint['departure_time'], stop_site['time_window']['start']))
             self.colocated_index.append(('colocated_index' in waypoint) and waypoint['colocated_index'] or '')
-        
+            if self.has_user_data:
+                self.user_data.append(
+                    user_data_to_string(stop_site['user_data']) if 'user_data' in stop_site else '')
+
     def to_pd(self):
         return pd.DataFrame({
             self.C.ROUTE_ID: self.route_id,
@@ -303,30 +422,50 @@ class RouteWaypoints:
             self.C.TW_END: self.tw_end,
             self.C.TRANSIT_DURATION: self.transit_duration,
             self.C.TRANSIT_DISTANCE: self.transit_distance,
+            **(
+                {
+                    self.C.ALT_TRANSIT_DURATION: self.alt_transit_duration,
+                    self.C.ALT_TRANSIT_DISTANCE: self.alt_transit_distance,
+                    self.C.ALT_TRANSIT_DURATION_ERROR: self.alt_transit_duration_error,
+                    self.C.ALT_TRANSIT_DISTANCE_ERROR: self.alt_transit_distance_error,
+                } if self.has_alt_transit else {}
+            ),
             self.C.ARRIVAL_TIME: self.arrival_time,
+            self.C.OUT_OF_TIME_DURATION: self.out_of_time_duration,
             self.C.IDLE_DURATION: self.idle_duration,
             self.C.JOB_DURATION: self.job_duration,
             self.C.DEPARTURE_TIME: self.departure_time,
-            self.C.COLOCATED: self.colocated_index
+            self.C.COLOCATED: self.colocated_index,
+            **(
+                {
+                    self.C.USERDATA: self.user_data
+                } if self.has_user_data else {}
+            )
         })
 
 
 class RoutesWaypoints:
     C = RouteWaypoints.C
-    def __init__(self, solution=None):
+    def __init__(self, solution=None, alt_transit_provider=None):
         routes = solution['result']['routes']
         self.routes = []
         for i, route in enumerate(routes):
             route_id = i + 1
             vehicle_id, shift_id = get_route_vehicle_and_shift_id(route)
-            self.routes.append(RouteWaypoints(route_id=route_id, vehicle_id=vehicle_id, shift_id=shift_id, route=route))
-            
+            self.routes.append(RouteWaypoints(
+                route_id=route_id, 
+                vehicle_id=vehicle_id,
+                shift_id=shift_id,
+                route=route,
+                alt_transit_provider=alt_transit_provider
+            ))
+
     def to_pd(self):
         return pd.concat([rw.to_pd() for rw in self.routes])
 
 
-def get_route_description(solution):
-    return RoutesWaypoints(solution).to_pd()
+def get_route_description(solution, alt_transit_provider=None):
+    return RoutesWaypoints(solution=solution, alt_transit_provider=alt_transit_provider).to_pd()
 
 
 def get_raw_statistics(solutions):
@@ -509,7 +648,7 @@ def write_metrics(writer, scenario_name, solutions, apikey):
     
     ws.set_column('A:A', 25, format_left)
     ws.set_column('B:F', 15, format_left)
-    ws.set_column('G:M', 15, format_floats_left)
+    ws.set_column('G:N', 15, format_floats_left)
 
 
 def write_routes(writer, scenario_name, solutions):
@@ -535,10 +674,10 @@ def write_routes(writer, scenario_name, solutions):
     ws.set_column('A:A', 8, format_left)
     ws.set_column('B:C', 15, format_left)
     ws.set_column('D:E', 15, format_floats_left)
-    ws.set_column('F:H', 15, format_left)
+    ws.set_column('F:J', 15, format_left)
 
 
-def write_waypoints(writer, scenario_name, solutions):
+def write_waypoints(writer, scenario_name, solutions, alt_transit_provider=None):
     wb = writer.book
     
     ws_key = 'Waypoints {}'.format(scenario_name)
@@ -551,7 +690,7 @@ def write_waypoints(writer, scenario_name, solutions):
     startrow = 0
     for task_id, solution in solutions.items():
         ws.write('A{}'.format(startrow + 1), task_id, format_left)
-        df = RoutesWaypoints(solution=solution).to_pd()
+        df = RoutesWaypoints(solution=solution, alt_transit_provider=alt_transit_provider).to_pd()
         df.to_excel(writer,
                     sheet_name=ws_key,
                     index=False,
@@ -562,7 +701,7 @@ def write_waypoints(writer, scenario_name, solutions):
     ws.set_column('B:B', 15, format_left)
     ws.set_column('C:D', 15, format_floats_left)
     ws.set_column('E:E', 15, format_left)
-    ws.set_column('F:L', 10, format_left)
+    ws.set_column('F:O', 10, format_left)
 
 
 def get_unserved(solution):
@@ -631,9 +770,23 @@ def write_unserved(writer, scenario_name, solutions):
     ws.set_column('G:H', 10, format_left)
 
 
+def write_custom(writer, sheets):
+    for ws_key, df in sheets.items():
+        pd.DataFrame([]).to_excel(writer, sheet_name=ws_key)
+        df.to_excel(writer, sheet_name=ws_key, index=False)
+
+
 def write_report(
-    filename, scenarios_solutions, apikey='', 
-    metrics=True, routes=True, waypoints=True, legend=True, timeline=True, unserved=True):
+    filename,
+    scenarios_solutions,
+    apikey='', 
+    metrics=True,
+    routes=True,
+    waypoints=True,
+    legend=True,
+    timeline=True,
+    unserved=True,
+    custom_sheets=None):
 
     old_style = pd.io.formats.excel.ExcelFormatter.header_style
     try:
@@ -669,6 +822,9 @@ def write_report(
                 if unserved:
                     print('writing unserved...')
                     write_unserved(writer, scenario_name, solutions)
+                if custom_sheets is not None:
+                    print('writing custom...')
+                    write_custom(writer, custom_sheets)
     finally:
         pd.io.formats.excel.ExcelFormatter.header_style = old_style
 

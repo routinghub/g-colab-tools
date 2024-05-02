@@ -32,7 +32,7 @@ _logger = _setup_logger()
 
 def _retryable_session():
     s = requests.Session()
-    retries = Retry(total=10, backoff_factor=2)
+    retries = Retry(total=10, backoff_factor=0.2)
     s.mount('https://', HTTPAdapter(max_retries=retries))
     return s
 
@@ -74,7 +74,9 @@ def _call_one(
     apikey: str,
     apihost: str = 'routinghub.com',
     api: str = 'routing',
-    api_version: str = 'v1-devel'
+    api_version: str = 'v1-devel',
+    logging: bool = True,
+    poll_result_s: int = 60,
 ) -> Dict:
     started_at = time.perf_counter()
     response = _add_task(request, apikey, apihost, api, api_version)
@@ -82,22 +84,25 @@ def _call_one(
     resp_json = response.json()
     if 'id' not in resp_json or 'status' not in resp_json or response.status_code >= 300:
         raise Exception('Unexpected API response: code={} body={}'.format(response.status_code, response.text))
-        
+
     task_id = resp_json['id']
     add_task_status = resp_json['status']
 
-    _logger.info('task={} submitted: id={} status={}'.format(name, task_id, add_task_status))
+    logging and _logger.info('task={} submitted: id={} status={}'.format(name, task_id, add_task_status))
     response = get_task_result(task_id, apikey,apihost,  api, api_version)
 
     while response.status_code not in (200, 500):
-        response = get_task_result(task_id, apikey, apihost, api, api_version)
-        time.sleep(5)
+        try:
+            response = get_task_result(task_id, apikey, apihost, api, api_version)
+        except:
+            logging and _logger.exception('task={} error, retrying in {}s'.format(name, poll_result_s))
+        time.sleep(poll_result_s)
 
     finished_at = time.perf_counter()
     response_json = response.json()
 
     elapsed = finished_at - started_at
-    _logger.info('task={} completed: status={}, elapsed={}s'.format(name, response_json['status'], elapsed))
+    logging and _logger.info('task={} completed: status={}, elapsed={}s'.format(name, response_json['status'], elapsed))
 
     return response_json
 
@@ -108,13 +113,15 @@ def _call_many(
     apihost: str = 'routinghub.com',
     api: str = 'routing',
     api_version: str = 'v1-devel',
-    max_workers: int = 4
+    max_workers: int = 4,
+    logging: bool = True,
+    poll_result_s: int = 60
 ) -> Generator[Tuple[str, Dict], None, None]:
     results = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures_names = {}
         for name, request in named_requests.items():
-            future = executor.submit(_call_one, name, request, apikey, apihost, api, api_version)
+            future = executor.submit(_call_one, name, request, apikey, apihost, api, api_version, logging, poll_result_s)
             futures_names[future] = name
 
         for future in as_completed(futures_names):
@@ -126,7 +133,7 @@ def _call_many(
             else:
                 yield (name, result)
 
-    _logger.info("done")
+    logging and _logger.info("done")
 
 
 def _is_completed(task_id, results):
@@ -151,10 +158,12 @@ def call_async(
     api: str = 'routing',
     api_version: str = 'v1-devel',
     max_workers: int = 4,
-    notify = False
+    notify: bool = False,
+    logging: bool = True,
+    poll_result_s: int = 60
 ) -> Generator[Tuple[str, Dict], None, None]:
 
-    yield from _call_many(tasks, apikey, apihost, api, api_version, max_workers)
+    yield from _call_many(tasks, apikey, apihost, api, api_version, max_workers, logging, poll_result_s)
 
     if notify:
         _notify('Jupyter', 'Tasks completed')
